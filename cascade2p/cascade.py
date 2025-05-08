@@ -522,7 +522,24 @@ def predict(
     """
     import tensorflow.keras
     from tensorflow.keras.models import load_model
+    import tensorflow as tf
 
+    
+    # TR2025
+    try:
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            best_gpu_index = get_gpu_with_max_free_memory()
+            # best_gpu_index = get_free_gpu()
+            # best_gpu_index = 2
+            print(f"CASCADE: Selecting GPU {best_gpu_index}")
+            tf.config.set_visible_devices(gpus[best_gpu_index], 'GPU')
+            tf.config.experimental.set_memory_growth(gpus[best_gpu_index], True)
+    except RuntimeError as e:
+        print("GPU must be configured before initializing TensorFlow:", e)
+        gpus = 3
+        
+    
     # reshape matrix of traces if only a single neuron's activity is provided as input to the inference
     if len(traces.shape) == 1:
         traces = np.expand_dims(traces,0)
@@ -552,10 +569,11 @@ def predict(
 
     # extract values from config file into variables
     verbose = cfg["verbose"]
-    if verbosity == 0:
+    if verbosity == 0:  
       verbose = 0
     training_data = cfg["training_datasets"]
     ensemble_size = cfg["ensemble_size"]
+    cfg["batch_size"] = 1024*5
     batch_size = cfg["batch_size"]
     sampling_rate = cfg["sampling_rate"]
     before_frac = cfg["before_frac"]
@@ -665,9 +683,16 @@ def predict(
             prediction = np.reshape(prediction_flat, (len(neuron_idx), XX.shape[1]))
 
             Y_predict[neuron_idx, :] += prediction / len(models)  # average predictions
-
+            
         # remove models from memory
+        # tensorflow.keras.backend.clear_session()
+        for model in models:
+            del model
+        del models
         tensorflow.keras.backend.clear_session()
+        
+        import gc
+        gc.collect()
 
     if threshold is False:  # only if 'False' is passed as argument
         if verbose:
@@ -908,3 +933,53 @@ def download_model(
         )
 
     return
+
+
+def get_gpu_with_max_free_memory():
+    import subprocess
+    import re
+    # Run nvidia-smi and capture output
+    result = subprocess.run(
+        ['nvidia-smi', '--query-gpu=memory.free', '--format=csv,nounits,noheader'],
+        stdout=subprocess.PIPE,
+        encoding='utf-8'
+    )
+    # Extract free memory of each GPU
+    memory_free = [int(x) for x in result.stdout.strip().split('\n')]
+    # Choose GPU with max free memory
+    best_gpu = memory_free.index(max(memory_free))
+    return best_gpu
+
+def get_free_gpu(preferred_gpus=[1, 2, 3], fallback_gpu=3):
+    try:
+        # Run nvidia-smi to get the list of GPU processes
+        result = subprocess.run(
+            ['nvidia-smi', '--query-compute-apps=gpu_uuid', '--format=csv,noheader'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding='utf-8'
+        )
+        used_gpu_indices = set()
+
+        # Parse which GPUs have running compute processes
+        if result.stdout.strip():
+            uuid_to_index = {
+                gpu.name: idx for idx, gpu in enumerate(tf.config.list_physical_devices('GPU'))
+            }
+            for line in result.stdout.strip().split('\n'):
+                uuid = line.strip()
+                for idx, gpu in enumerate(tf.config.list_physical_devices('GPU')):
+                    if uuid in gpu.name:
+                        used_gpu_indices.add(idx)
+        
+        # Choose the first preferred GPU not in use
+        for gpu_idx in preferred_gpus:
+            if gpu_idx not in used_gpu_indices:
+                return gpu_idx
+
+        # Fallback
+        return fallback_gpu
+
+    except Exception as e:
+        print("Could not determine GPU usage:", e)
+        return fallback_gpu
