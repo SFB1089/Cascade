@@ -592,7 +592,7 @@ def predict(
       verbose = 0
     training_data = cfg["training_datasets"]
     ensemble_size = cfg["ensemble_size"]
-    cfg["batch_size"] = 1024 * 5
+    cfg["batch_size"] = 1024 * 128  # 131072 — large batches for H100 efficiency
     batch_size = cfg["batch_size"]
     sampling_rate = cfg["sampling_rate"]
     before_frac = cfg["before_frac"]
