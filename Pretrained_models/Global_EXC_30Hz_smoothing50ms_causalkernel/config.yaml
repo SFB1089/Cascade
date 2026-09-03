@@ -70,7 +70,7 @@ optimizer: Adagrad                    #                  optimizer
 
 nr_of_epochs: 10                 # Number of training epochs per model
 ensemble_size: 5                 # Number of models trained for one noise level
-batch_size: 8192                 # Batch size
+batch_size: 4096                 # Batch size
 
 ## Information about status of fitting
 
