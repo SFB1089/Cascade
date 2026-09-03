@@ -94,7 +94,7 @@ def train_model(
     # load cfg dictionary from config.yaml file
     cfg = config.read_config(cfg_file)
     verbose = cfg["verbose"]
-
+    verbose = True
     if verbose:
         print(
             "Used configuration for model fitting (file {}):\n".format(
@@ -520,11 +520,30 @@ def predict(
         This array can contain NaNs if the value 'padding' was np.nan as input argument
 
     """
+    import tensorflow as tf
+    # mixed_precision.set_global_policy("mixed_bfloat16")  %TR2025
+    # TR2025 - Configure GPU BEFORE importing keras
+    try:
+        gpus = tf.config.list_physical_devices('GPU')
+        if gpus:
+            best_gpu_index = get_gpu_with_max_free_memory()
+            # best_gpu_index = get_free_gpu()
+            # best_gpu_index = 2
+            print(f"CASCADE: Selecting GPU {best_gpu_index}")
+            tf.config.set_visible_devices(gpus[best_gpu_index], 'GPU')
+            tf.config.experimental.set_memory_growth(gpus[best_gpu_index], True)
+            print(f"CASCADE: Successfully configured GPU {best_gpu_index}")
+        else:
+            print("CASCADE: No GPUs found, using CPU")
+    except Exception as e:
+        print(f"CASCADE: Error configuring GPU: {e}")
+        print("CASCADE: Falling back to default GPU configuration")
+    
     import tensorflow.keras
     from tensorflow.keras.models import load_model
     import tensorflow as tf
 
-    
+
     # TR2025
     try:
         gpus = tf.config.list_physical_devices('GPU')
@@ -538,7 +557,7 @@ def predict(
     except RuntimeError as e:
         print("GPU must be configured before initializing TensorFlow:", e)
         gpus = 3
-        
+
     
     # reshape matrix of traces if only a single neuron's activity is provided as input to the inference
     if len(traces.shape) == 1:
@@ -573,7 +592,7 @@ def predict(
       verbose = 0
     training_data = cfg["training_datasets"]
     ensemble_size = cfg["ensemble_size"]
-    cfg["batch_size"] = 1024*5
+    cfg["batch_size"] = 1024
     batch_size = cfg["batch_size"]
     sampling_rate = cfg["sampling_rate"]
     before_frac = cfg["before_frac"]
@@ -679,7 +698,24 @@ def predict(
             if verbose:
                 print("\t... ensemble", j)
 
-            prediction_flat = model.predict(XX_sel, batch_size, verbose=verbose)
+            # model.predict(XX_sel, batch_size) calls tf.constant() on the ENTIRE
+            # XX_sel array internally (via tf.data.Dataset.from_tensor_slices) even
+            # when batching. For large sessions (thousands of ROIs × hundreds of
+            # thousands of timepoints), XX_sel can be 100+ GB, and TF trying to
+            # pin that as a constant in GPU-accessible memory causes:
+            #   "Failed copying input tensor ... Dst tensor is not initialized"
+            # Fix: manually iterate over batch_size slices of the numpy array,
+            # converting each to a small tf.constant (0.26 MB per batch) so only
+            # batch_size rows ever hit GPU memory at a time.
+            n_samples = XX_sel.shape[0]
+            preds = []
+            for _start in range(0, n_samples, batch_size):
+                _batch = tf.constant(
+                    XX_sel[_start:_start + batch_size], dtype=tf.float32
+                )
+                _pred = model(_batch, training=False)
+                preds.append(_pred.numpy())
+            prediction_flat = np.concatenate(preds, axis=0)
             prediction = np.reshape(prediction_flat, (len(neuron_idx), XX.shape[1]))
 
             Y_predict[neuron_idx, :] += prediction / len(models)  # average predictions
